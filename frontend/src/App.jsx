@@ -8,8 +8,6 @@ function App() {
   const [selectedDocumentName, setSelectedDocumentName] = useState("");
   const [selectedFile, setSelectedFile] = useState(null);
   const [question, setQuestion] = useState("");
-  const [answer, setAnswer] = useState("");
-  const [sources, setSources] = useState([]);
   const [uploadMessage, setUploadMessage] = useState("");
   const [isUploading, setIsUploading] = useState(false);
   const [isAsking, setIsAsking] = useState(false);
@@ -17,6 +15,10 @@ function App() {
   const [documents, setDocuments] = useState([]);
   const [documentsLoading, setDocumentsLoading] = useState(false);
   const [documentsError, setDocumentsError] = useState("");
+  const [messages, setMessages] = useState([]);
+  const [conversationTitle, setConversationTitle] = useState("");
+  const [conversationId, setConversationId] = useState(null);
+  const [conversations, setConversations] = useState([]);
   const uploadDocument = async () => {
     if (!selectedFile) {
       return;
@@ -55,43 +57,94 @@ function App() {
   };
 
   const askQuestion = async () => {
-    if (!question.trim()) {
-      return;
-    }
+  const trimmedQuestion = question.trim();
 
-    setIsAsking(true);
-    setAnswer("");
-    setSources([]);
-    setErrorMessage("");
+  if (!trimmedQuestion) {
+    return;
+  }
 
-    try {
-      const response = await fetch("http://127.0.0.1:8000/search", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          question: question,
-          document_id: selectedDocumentId,
-        }),
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(
-          data.detail || "Cevap oluşturulurken bir hata oluştu."
-        );
-      }
-
-      setAnswer(data.answer);
-      setSources(data.sources || []);
-    } catch (error) {
-      setErrorMessage(error.message);
-    } finally {
-      setIsAsking(false);
-    }
+  const userMessage = {
+    role: "user",
+    content: trimmedQuestion,
   };
+  if (!conversationTitle) {
+  setConversationTitle(trimmedQuestion);
+}
+
+  setMessages((currentMessages) => [
+    ...currentMessages,
+    userMessage,
+  ]);
+
+  setQuestion("");
+  setIsAsking(true);
+  setErrorMessage("");
+
+  try {
+  let activeConversationId = conversationId;
+
+  if (!activeConversationId) {
+    activeConversationId = await createConversation(
+      trimmedQuestion
+    );
+  }
+
+  const response = await fetch(
+    "http://127.0.0.1:8000/search",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        question: trimmedQuestion,
+        document_id: selectedDocumentId || null,
+        conversation_id: activeConversationId,
+      }),
+    }
+  );
+
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(
+        data.detail ||
+          "Cevap oluşturulurken bir hata oluştu."
+      );
+    }
+
+    const assistantMessage = {
+      role: "assistant",
+      content: data.answer,
+      sources: data.sources || [],
+    };
+
+    setMessages((currentMessages) => [
+      ...currentMessages,
+      assistantMessage,
+    ]);
+  } catch (error) {
+    setErrorMessage(error.message);
+
+    const errorMessage = {
+      role: "assistant",
+      content:
+        "Üzgünüm, cevap oluşturulurken bir hata meydana geldi.",
+      sources: [],
+      isError: true,
+    };
+
+    setMessages((currentMessages) => [
+      ...currentMessages,
+      errorMessage,
+    ]);
+  } finally {
+    setIsAsking(false);
+  }
+};
+
+  
   const fetchDocuments = async () => {
   try {
     setDocumentsLoading(true);
@@ -138,6 +191,10 @@ const deleteDocument = async (documentId) => {
         data.detail || "Doküman silinemedi."
       );
     }
+    if (selectedDocumentId === documentId) {
+      setSelectedDocumentId(null);
+      setSelectedDocumentName("");
+      }
 
     await fetchDocuments();
 
@@ -145,7 +202,78 @@ const deleteDocument = async (documentId) => {
     setErrorMessage(error.message);
   }
 };
+const createConversation = async (title) => {
+  const response = await fetch("http://127.0.0.1:8000/conversations", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      title: title,
+      document_id: selectedDocumentId || null,
+    }),
+  });
 
+  if (!response.ok) {
+    throw new Error("Conversation oluşturulamadı.");
+  }
+
+  const data = await response.json();
+
+  setConversationId(data.conversation_id);
+  await loadConversations();
+
+  return data.conversation_id;
+};
+const startNewConversation = () => {
+  setMessages([]);
+  setQuestion("");
+  setErrorMessage("");
+  setConversationTitle("");
+  setConversationId(null);
+};
+const loadConversations = async () => {
+  const response = await fetch(
+    "http://127.0.0.1:8000/conversations"
+  );
+
+  if (!response.ok) {
+    throw new Error("Conversations yüklenemedi.");
+  }
+
+  const data = await response.json();
+
+  setConversations(data);
+};
+const loadConversationMessages = async (conversationId) => {
+  console.log("Tıklanan conversation:", conversationId);
+
+  const response = await fetch(
+    `http://127.0.0.1:8000/conversations/${conversationId}/messages`
+  );
+
+  console.log("Response status:", response.status);
+
+  if (!response.ok) {
+    throw new Error("Conversation yüklenemedi.");
+  }
+
+  const data = await response.json();
+
+  console.log("Backend'den gelen mesajlar:", data);
+
+  setConversationId(conversationId);
+
+  setMessages(
+    data.map((message) => ({
+      role: message.role,
+      content: message.content
+    }))
+  );
+};
+useEffect(() => {
+  loadConversations();
+}, []);
 useEffect(() => {
   fetchDocuments();
 }, []);
@@ -162,6 +290,33 @@ useEffect(() => {
             <div>
               <h1>ScholarMind AI</h1>
               <span>Research Intelligence Platform</span>
+            </div>
+          </div>
+          <div className="conversation-list">
+            <h3>Research History</h3>
+
+            <div className="conversation-items">
+              {conversations.map((conversation) => (
+                <button
+                  key={conversation.conversation_id}
+                  className={`conversation-item ${
+                      conversationId === conversation.conversation_id
+                          ? "active"
+                          : ""
+                  }`}
+                  onClick={() =>
+                      loadConversationMessages(
+                          conversation.conversation_id
+                      )
+                  }
+              >
+                                <span className="conversation-icon">✦</span>
+
+                  <span className="conversation-title">
+                    {conversation.title}
+                  </span>
+                </button>
+              ))}
             </div>
           </div>
 
@@ -320,21 +475,21 @@ useEffect(() => {
         </section>
 
         <section className="documents-section">
-  <div className="documents-header">
-    <div>
-      <p className="step-label">LIBRARY</p>
-      <h3>My Documents</h3>
-    </div>
+          <div className="documents-header">
+            <div>
+              <p className="step-label">LIBRARY</p>
+              <h3>My Documents</h3>
+            </div>
 
-    <button
-      type="button"
-      className="secondary-button"
-      onClick={fetchDocuments}
-      disabled={documentsLoading}
-    >
-      {documentsLoading ? "Loading..." : "Refresh"}
-    </button>
-  </div>
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={fetchDocuments}
+              disabled={documentsLoading}
+            >
+              {documentsLoading ? "Loading..." : "Refresh"}
+            </button>
+          </div>
 
   {documentsError && (
     <div className="message-box error-message">
@@ -403,52 +558,100 @@ useEffect(() => {
   </div>
 </section>
 
-        <section className="answer-panel">
-          <div className="answer-header">
-            <div>
-              <p className="step-label">RESPONSE</p>
-              <h3>Research answer</h3>
-            </div>
-
-            <span className="answer-status">
-              {answer ? "Generated" : "Waiting for question"}
-            </span>
+       <section className="answer-panel chat-panel">
+        <div className="answer-header">
+          <div>
+            <p className="step-label">CONVERSATION</p>
+            <h3>
+              {conversationTitle || "Research chat"}
+              </h3>
           </div>
 
-          {answer ? (
-            <>
-              <div className="answer-content">
-                <p>{answer}</p>
-              </div>
+          <div className="conversation-actions">
+            <span className="answer-status">
+              {messages.length > 0
+                ? `${messages.length} messages`
+                : "Waiting for question"}
+            </span>
 
-              {sources.length > 0 && (
-                <div className="sources-section">
-                  <h4>Sources</h4>
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={startNewConversation}
+              disabled={messages.length === 0 || isAsking}
+            >
+              New Chat
+            </button>
+          </div>
+        </div>
 
-                  <div className="sources-list">
-                    {sources.map((source, index) => (
-                      <div className="source-card"
-    key={`${source.filename}-${source.page_number}-${index}`}>
-  <strong>{source.filename}</strong>
-  <p>Sayfa {source.page_number}</p>
-</div>
-                    ))}
-                  </div>
+        {messages.length === 0 ? (
+          <div className="empty-state">
+            <div className="empty-icon">✦</div>
+
+            <strong>Your conversation will appear here</strong>
+
+            <span>
+              Upload or select a document and ask your first question.
+            </span>
+          </div>
+        ) : (
+          <div className="chat-messages">
+            {messages.map((message, index) => (
+              <div
+                className={`chat-message ${message.role}`}
+                key={`${message.role}-${index}`}
+              >
+                <div className="message-role">
+                  {message.role === "user"
+                    ? "You"
+                    : "ScholarMind AI"}
                 </div>
-              )}
-            </>
-          ) : (
-            <div className="empty-state">
-              <div className="empty-icon">✦</div>
 
-              <strong>Your answer will appear here</strong>
+                <div
+                  className={`message-bubble ${
+                    message.isError ? "message-error" : ""
+                  }`}
+                >
+                  <p>{message.content}</p>
 
-              <span>
-                Upload a document and ask a question to start the RAG pipeline.
-              </span>
-            </div>
-          )}
-        </section>
+                  {message.sources?.length > 0 && (
+                    <div className="message-sources">
+                      <strong>Sources</strong>
+
+                      {message.sources.map(
+                        (source, sourceIndex) => (
+                          <div
+                            className="message-source"
+                            key={`${source.filename}-${source.page_number}-${sourceIndex}`}
+                          >
+                            <span>{source.filename}</span>
+                            <span>
+                              Sayfa {source.page_number}
+                            </span>
+                          </div>
+                        )
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+
+            {isAsking && (
+              <div className="chat-message assistant">
+                <div className="message-role">
+                  ScholarMind AI
+                </div>
+
+                <div className="message-bubble typing-message">
+                  Cevap hazırlanıyor...
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </section>
       </main>
     </div>
   );

@@ -3,7 +3,8 @@ from app.services.pdf_reader import extract_pages_from_pdf
 from app.services.text_chunker import split_pages_into_chunks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from app.services.vector_store import ( store_chunks,search_similar_chunks,delete_document_chunks)
+from app.services.vector_store import ( 
+    store_chunks,search_similar_chunks,delete_document_chunks)
 from app.services.embedding_service import (
     create_embeddings,create_query_embedding
 )
@@ -14,10 +15,21 @@ from app.database import models
 from app.database.models import Document
 from sqlalchemy.orm import Session
 from fastapi import HTTPException
+from app.services.conversation_service import (
+    create_conversation,
+    get_all_conversation,
+    get_all_conversations
+)
+from app.services.message_service import (
+     create_message,
+     get_conversation_messages)
 
 class QuestionRequest(BaseModel):
     question: str
     document_id: str | None = None
+    conversation_id:str | None=None
+
+
 Base.metadata.create_all(bind=engine)
 app=FastAPI(
     title="ScholarMind AI",
@@ -25,6 +37,11 @@ app=FastAPI(
     version="1.0.0"
 
 )
+
+class ConversationCreateRequest(BaseModel):
+    title:str
+    document_id:str | None=None
+
 @app.get("/")
 def root():
     return{"message":"Welcome to ScholarMınd AI"}
@@ -141,15 +158,36 @@ def delete_document(
 
 
 @app.post("/search")
-def search_chunks(request:QuestionRequest):
-    query_embeddings=create_query_embedding(request.question)
-    results=search_similar_chunks(query_embedding=query_embeddings,
-                                 n_results=3,
-                                 document_id=request.document_id)
+def search_chunks(request:QuestionRequest,
+                  db:Session=Depends(get_db)):
+    
+    if request.conversation_id:
+        create_message(
+            db=db,
+            conversation_id=request.conversation_id,
+            role="user",
+            content=request.question
+        )
+    query_embeddings=create_query_embedding(
+        request.question
+        )
+    results=search_similar_chunks(
+        query_embedding=query_embeddings,
+         n_results=3,
+        document_id=request.document_id)
     
     relevant_chunks=results["documents"][0]
-    answer=generate_answer(question=request.question,
-                           context_chunks=relevant_chunks)
+    answer=generate_answer(
+        question=request.question,
+        context_chunks=relevant_chunks)
+    
+    if request.conversation_id:
+        create_message(
+            db=db,
+            conversation_id=request.conversation_id,
+            role="assistant",
+            content=answer
+        )
     
     return {
         "question": request.question,
@@ -165,3 +203,55 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.post("/conversations")
+def create_new_conversation(
+    request: ConversationCreateRequest,
+    db:Session=Depends(get_db)
+):
+    conversation= create_conversation(
+        db=db,
+        title=request.title,
+        document_id=request.document_id
+    )
+
+    return{
+        "conversation_id":conversation.id,
+        "title":conversation.title,
+        "document_id":conversation.document_id,
+        "created_at":conversation.created_at
+        
+    }
+@app.get("/conversations")
+def list_conversations(
+    db:Session=Depends(get_db)):
+
+    conversations=get_all_conversation(db)
+    return[
+        {
+            "conversation_id":conversation.id,
+            "title":conversation.title,
+            "document_id":conversation.document_id,
+            "created_at":conversation.created_at
+        }
+        for conversation in conversations
+    ]
+
+@app.get("/conversations/{conversation_id}/messages")
+def get_messages(
+    conversation_id:str,
+    db:Session=Depends(get_db)
+):
+    messages=get_conversation_messages(
+        db=db,
+        conversation_id=conversation_id
+    )
+    return[
+        {
+            "id":message.id,
+            "role":message.role,
+            "content":message.content,
+            "created_at":message.created_at
+        }
+        for message in messages
+    ]
