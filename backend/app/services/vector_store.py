@@ -75,3 +75,34 @@ def find_document_by_hash(file_hash:str):
 
     )
     return results
+def get_all_chunks(
+    document_id: str | None = None
+) -> list[dict]:
+
+    where_filter = None
+
+    if document_id:
+        where_filter = {
+            "document_id": document_id
+        }
+
+    results = collection.get(
+        where=where_filter,
+        include=[
+            "documents",
+            "metadatas"
+        ]
+    )
+
+    chunks = []
+
+    for document, metadata in zip(
+        results["documents"],
+        results["metadatas"]
+    ):
+        chunks.append({
+            "text": document,
+            "metadata": metadata
+        })
+
+    return chunks

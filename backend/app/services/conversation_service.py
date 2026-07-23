@@ -27,9 +27,3 @@ def get_all_conversation(db):
     
     )
 
-def get_all_conversations(db):
-    return(
-    db.query(Conversation)
-    .order_by(Conversation.created_at.desc())
-    .all()
-)

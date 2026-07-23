@@ -3,32 +3,28 @@ from app.services.pdf_reader import extract_pages_from_pdf
 from app.services.text_chunker import split_pages_into_chunks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from app.services.vector_store import ( 
-    store_chunks,search_similar_chunks,delete_document_chunks)
-from app.services.embedding_service import (
-    create_embeddings,create_query_embedding
+from app.services.vector_store import (
+    store_chunks,
+    delete_document_chunks
 )
+from google.genai.errors import ServerError
+from app.services.embedding_service import create_embeddings
 from app.services.document_service import (generate_document_id,generate_file_hash,document_exists)
-from app.services.llm_services import generate_answer
 from app.database.database import Base,engine,get_db
 from app.database import models
 from app.database.models import Document
 from sqlalchemy.orm import Session
-from fastapi import HTTPException
-from app.services.conversation_service import (
-    create_conversation,
-    get_all_conversation,
-    get_all_conversations
-)
+from app.services.conversation_service import create_conversation,get_all_conversation
 from app.services.message_service import (
      create_message,
      get_conversation_messages)
-
+from app.services.retrieval_service import retrieve_relevant_chunks
 class QuestionRequest(BaseModel):
     question: str
     document_id: str | None = None
     conversation_id:str | None=None
-
+from app.services.response_service import build_sources
+from app.services.answer_service import generate_answer_with_retry
 
 Base.metadata.create_all(bind=engine)
 app=FastAPI(
@@ -36,6 +32,17 @@ app=FastAPI(
     description="RAG-based AI Researcher Assistant",
     version="1.0.0"
 
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 class ConversationCreateRequest(BaseModel):
@@ -106,7 +113,7 @@ async def upload_pdf(file:UploadFile=File(...),
     }
 
 @app.get("/documents")
-def get_comments(
+def get_documents(
     db:Session=Depends(get_db)
 ):
     documents=db.query(Document).order_by(
@@ -158,9 +165,10 @@ def delete_document(
 
 
 @app.post("/search")
-def search_chunks(request:QuestionRequest,
-                  db:Session=Depends(get_db)):
-    
+def search_chunks(
+    request: QuestionRequest,
+    db: Session = Depends(get_db)
+):
     if request.conversation_id:
         create_message(
             db=db,
@@ -168,19 +176,50 @@ def search_chunks(request:QuestionRequest,
             role="user",
             content=request.question
         )
-    query_embeddings=create_query_embedding(
-        request.question
-        )
-    results=search_similar_chunks(
-        query_embedding=query_embeddings,
-         n_results=3,
-        document_id=request.document_id)
-    
-    relevant_chunks=results["documents"][0]
-    answer=generate_answer(
+
+    diverse_results = retrieve_relevant_chunks(
         question=request.question,
-        context_chunks=relevant_chunks)
-    
+        document_id=request.document_id
+    )
+
+    relevant_chunks = [
+        item["text"]
+        for item in diverse_results
+    ]
+
+    if not relevant_chunks:
+        answer = (
+            "Bu soruyla ilgili yeterince alakalı "
+            "bir kaynak bulunamadı."
+        )
+
+        if request.conversation_id:
+            create_message(
+                db=db,
+                conversation_id=request.conversation_id,
+                role="assistant",
+                content=answer
+            )
+
+        return {
+            "question": request.question,
+            "answer": answer,
+            "sources": [],
+            "conversation_id": request.conversation_id
+        }
+
+    try:
+        answer = generate_answer_with_retry(
+            question=request.question,
+            context_chunks=relevant_chunks
+        )
+
+    except ServerError:
+        raise HTTPException(
+            status_code=503,
+            detail="Yapay zeka servisi şu anda yoğun."
+        )
+
     if request.conversation_id:
         create_message(
             db=db,
@@ -188,22 +227,15 @@ def search_chunks(request:QuestionRequest,
             role="assistant",
             content=answer
         )
-    
+
+    sources = build_sources(diverse_results)
+
     return {
         "question": request.question,
         "answer": answer,
-        "sources": results["metadatas"][0],
-        "distances": results["distances"][0]
+        "sources": sources,
+        "conversation_id": request.conversation_id
     }
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 @app.post("/conversations")
 def create_new_conversation(
     request: ConversationCreateRequest,
